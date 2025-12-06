@@ -192,6 +192,43 @@ async def add_to_cart(callback: CallbackQuery, state: FSMContext):
     await show_menu(callback, state)
 
 
+@router.callback_query(F.data == "my_orders")
+async def show_my_orders(callback: CallbackQuery):
+    if not await check_user_registration(callback):
+        return
+
+    user_id = callback.from_user.id
+    orders = sheets.get_user_orders(user_id)
+
+    if not orders:
+        orders_text = "📋 История заказов пуста.\n\nУ вас еще нет оформленных заказов."
+    else:
+        orders_text = "📋 История ваших заказов:\n\n"
+        # Берем последние 5 заказов, сортируем по дате в обратном порядке
+        recent_orders = sorted(orders, key=lambda x: x.get("Дата_заказа", ""), reverse=True)[:5]
+
+        for i, order in enumerate(recent_orders, 1):
+            order_date = order.get("Дата_заказа", "Нет данных")
+            items = order.get("Состав", "Нет данных")
+            total_price = order.get("Сумма", "0")
+            orders_text += f"{i}. Заказ от {order_date}:\n   {items}\n   💰 Сумма: {total_price}₽\n\n"
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="📊 Статистика", callback_data="stats")
+    keyboard.button(text="⬅️ Назад", callback_data="back_to_main")
+    keyboard.adjust(1)
+
+    # Добавляем обработчик для случая, когда содержимое не изменилось
+    async def on_same_content(cb: CallbackQuery):
+        await safe_answer_callback(cb, "🔄 Вы уже просматриваете историю заказов", show_alert=False)
+
+    await safe_edit_message(
+        callback,
+        orders_text,
+        keyboard.as_markup(),
+        on_same_content=on_same_content
+    )
+
 @router.callback_query(F.data == "cart")
 async def show_cart(callback: CallbackQuery, state: FSMContext):
     if not await check_user_registration(callback):
