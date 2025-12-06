@@ -1,9 +1,11 @@
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 import pytz
 import logging
 import os
+import time
 from config.settings import Config
 
 logger = logging.getLogger(__name__)
@@ -27,7 +29,7 @@ class GoogleSheetsService:
             self._init_google_client()
 
     def _init_google_client(self):
-        """Инициализация подключения к Google Sheets с детальной диагностикой"""
+        """Инициализация подключения к Google Sheets с детальной диагностикой и обработкой ошибок аутентификации"""
         try:
             logger.info("🔍 Попытка подключения к Google Sheets...")
             logger.info(f"📄 Путь к credentials: {Config.GOOGLE_CREDENTIALS_PATH}")
@@ -36,22 +38,88 @@ class GoogleSheetsService:
             # Проверка существования файла credentials
             if not os.path.exists(Config.GOOGLE_CREDENTIALS_PATH):
                 logger.error(f"❌ Файл credentials не найден: {Config.GOOGLE_CREDENTIALS_PATH}")
-                logger.error("💡 Совет: Убедитесь, что файл google_auth.json находится в папке config/")
+                logger.error("💡 Совет: Убедитесь, что файл google_auth.json существует и находится в правильной папке")
+                logger.error("💡 Путь к файлу должен быть: " + os.path.abspath(Config.GOOGLE_CREDENTIALS_PATH))
                 raise FileNotFoundError(f"Credentials file not found at {Config.GOOGLE_CREDENTIALS_PATH}")
 
-            scope = [
-                "https://spreadsheets.google.com/feeds",
-                "https://www.googleapis.com/auth/drive"
-            ]
+            # Проверка содержимого файла credentials
+            try:
+                with open(Config.GOOGLE_CREDENTIALS_PATH, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if not content.strip():
+                        logger.error("❌ Файл credentials пустой!")
+                        raise ValueError("Credentials file is empty")
+                    # Проверяем, что это JSON
+                    import json
+                    json.loads(content)
+                    logger.info("✅ Файл credentials содержит корректный JSON")
+            except json.JSONDecodeError:
+                logger.error("❌ Файл credentials не является корректным JSON!")
+                logger.error("💡 Совет: Скачайте новый файл JSON из Google Cloud Console")
+                raise
+            except Exception as e:
+                logger.error(f"❌ Ошибка чтения файла credentials: {str(e)}")
+                raise
 
-            creds = ServiceAccountCredentials.from_json_keyfile_name(
-                Config.GOOGLE_CREDENTIALS_PATH, scope
-            )
-            self.client = gspread.authorize(creds)
+            # Попытка аутентификации с обработкой ошибок
+            logger.info("🔑 Попытка аутентификации в Google API...")
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    if attempt > 0:
+                        logger.info(f"🔄 Попытка подключения #{attempt + 1} из {max_attempts}")
+                        time.sleep(2)  # Задержка между попытками
 
-            logger.info("✅ Успешная авторизация в Google API")
+                    # Используем более надежный метод аутентификации
+                    scope = [
+                        "https://spreadsheets.google.com/feeds",
+                        "https://www.googleapis.com/auth/drive",
+                        "https://www.googleapis.com/auth/spreadsheets"
+                    ]
+
+                    # Читаем credentials напрямую
+                    creds = Credentials.from_service_account_file(
+                        Config.GOOGLE_CREDENTIALS_PATH,
+                        scopes=scope
+                    )
+
+                    # Создаем клиент gspread
+                    self.client = gspread.authorize(creds)
+
+                    # Проверяем соединение
+                    logger.info("✅ Успешная аутентификация в Google API")
+                    break
+
+                except Exception as auth_error:
+                    logger.error(f"❌ Ошибка аутентификации (попытка {attempt + 1}/{max_attempts}): {str(auth_error)}")
+                    if attempt == max_attempts - 1:
+                        logger.error("❌ Все попытки аутентификации неудачны")
+                        logger.error("💡 ВОЗМОЖНЫЕ ПРИЧИНЫ И РЕШЕНИЯ:")
+                        logger.error("1. Неверный файл сервисного аккаунта")
+                        logger.error("   - Удалите текущий файл google_auth.json")
+                        logger.error("   - Скачайте НОВЫЙ файл JSON из Google Cloud Console")
+                        logger.error("   - Сохраните его как config/google_auth.json")
+
+                        logger.error("2. Проблема с системным временем")
+                        logger.error("   - Убедитесь, что на вашем компьютере правильное время и дата")
+                        logger.error("   - Разница во времени не должна превышать 5 минут")
+
+                        logger.error("3. Сервисный аккаунт отключен")
+                        logger.error("   - Перейдите в Google Cloud Console → IAM & Admin")
+                        logger.error("   - Убедитесь, что сервисный аккаунт активен")
+
+                        logger.error("4. Нет доступа к таблице")
+                        logger.error("   - Откройте Google Таблицу → нажмите 'Поделиться'")
+                        logger.error("   - Добавьте email из файла google_auth.json с правами 'Редактор'")
+
+                        logger.error("\n💡 ВРЕМЕННОЕ РЕШЕНИЕ:")
+                        logger.error("Чтобы продолжить работу, установите в .env:")
+                        logger.error("LOCAL_MODE=True")
+
+                        raise auth_error
 
             # Попытка открыть таблицу
+            logger.info(f"📄 Попытка открыть таблицу с ID: {Config.SPREADSHEET_ID}")
             self.spreadsheet = self.client.open_by_key(Config.SPREADSHEET_ID)
             logger.info(f"✅ Таблица успешно открыта: {self.spreadsheet.title}")
 
@@ -71,6 +139,14 @@ class GoogleSheetsService:
 
         except Exception as e:
             logger.error(f"❌ Критическая ошибка подключения к Google Sheets: {str(e)}", exc_info=True)
+
+            # Предлагаем временное решение
+            logger.warning("\n💡 РЕКОМЕНДУЕМЫЕ ДЕЙСТВИЯ:")
+            logger.warning("1. Проверьте правильность SPREADSHEET_ID в .env")
+            logger.warning("2. Проверьте наличие и содержимое файла config/google_auth.json")
+            logger.warning("3. Убедитесь, что системное время на компьютере правильное")
+            logger.warning("4. Временно установите LOCAL_MODE=True в .env для тестирования")
+
             self.spreadsheet = None
 
     def _create_required_sheet(self, sheet_name):
