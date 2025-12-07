@@ -12,11 +12,14 @@ class Config:
     TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
     ORDER_DEADLINE_HOUR = int(os.getenv("ORDER_DEADLINE_HOUR", 10))
     ORDER_DEADLINE_MINUTE = int(os.getenv("ORDER_DEADLINE_MINUTE", 0))
+    TEST_MODE = os.getenv("TEST_MODE", "False").lower() == "true"
     LOCAL_MODE = os.getenv("LOCAL_MODE", "False").lower() == "true"
 
     @classmethod
     def update_from_env(cls):
         """Обновление настроек из переменных окружения"""
         for key, value in os.environ.items():
-            if key.startswith("ORDER_DEADLINE_") or key in ["TIMEZONE"]:
-                setattr(cls, key, value)
+            if key in ["ORDER_DEADLINE_HOUR", "ORDER_DEADLINE_MINUTE"]:
+                setattr(cls, key, int(value))
+            elif key in ["TEST_MODE", "LOCAL_MODE"]:
+                setattr(cls, key, value.lower() == "true")

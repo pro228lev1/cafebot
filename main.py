@@ -1,11 +1,13 @@
 import asyncio
 import logging
 import sys
+import time
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import (
     TelegramAPIError,
     TelegramNetworkError,
-    TelegramServerError
+    TelegramServerError,
+    TelegramConflictError
 )
 from config.settings import Config
 from handlers import user_handlers, admin_handlers
@@ -25,15 +27,20 @@ async def graceful_shutdown(bot: Bot):
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await bot.session.close()
-        logger.info("Бот успешно остановлен")
+        logger.info("✅ Бот успешно остановлен")
     except Exception as e:
-        logger.error(f"Ошибка при завершении работы: {e}")
+        logger.error(f"❌ Ошибка при завершении работы: {e}")
 
 
-# Исправленный обработчик ошибок
-async def error_handler(event, exception):
+async def error_handler(update, exception):
     """Глобальный обработчик ошибок"""
-    logger.error(f"Event {event} caused error: {exception}", exc_info=True)
+    logger.error(f"Update {update} caused error: {exception}", exc_info=True)
+
+    # Обработка конфликта экземпляров
+    if isinstance(exception, TelegramConflictError):
+        logger.critical("❌ КОНФЛИКТ ЭКЗЕМПЛЯРОВ: Обнаружен другой запущенный экземпляр бота!")
+        logger.critical("💡 РЕШЕНИЕ: Завершите все другие процессы бота перед запуском")
+        return True
 
     # Игнорируем известные не критические ошибки
     ignore_errors = [
@@ -63,6 +70,10 @@ async def main():
         logger.critical("❌ ОШИБКА: Не указан TELEGRAM_BOT_TOKEN в .env")
         return
 
+    # Проверка на несколько экземпляров
+    logger.info("🔍 Проверка на наличие других экземпляров бота...")
+    time.sleep(3)  # Небольшая задержка для завершения предыдущих экземпляров
+
     bot = Bot(token=Config.BOT_TOKEN)
     dp = Dispatcher()
 
@@ -76,6 +87,7 @@ async def main():
     # Информация о запуске
     logger.info("🚀 Бот запущен!")
     logger.info(f"🔧 Режим: {'ЛОКАЛЬНЫЙ' if Config.LOCAL_MODE else 'ПРОДАКШН'}")
+    logger.info(f"⏱️ Тестовый режим (без дедлайна): {'ВКЛЮЧЕН' if Config.TEST_MODE else 'ВЫКЛЮЧЕН'}")
     if not Config.LOCAL_MODE:
         logger.info(f"📊 Google Sheets ID: {Config.SPREADSHEET_ID}")
 
@@ -83,6 +95,13 @@ async def main():
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
+    except TelegramConflictError:
+        logger.critical("❌ КРИТИЧЕСКАЯ ОШИБКА: Обнаружен другой запущенный экземпляр бота")
+        logger.critical("💡 СРОЧНОЕ РЕШЕНИЕ:")
+        logger.critical("1. Закройте все окна терминала с запущенным ботом")
+        logger.critical("2. Выполните в PowerShell: Stop-Process -Name 'python' -Force")
+        logger.critical("3. Подождите 30 секунд")
+        logger.critical("4. Перезапустите бота")
     except KeyboardInterrupt:
         logger.info("🛑 Бот остановлен пользователем")
     except Exception as e:
