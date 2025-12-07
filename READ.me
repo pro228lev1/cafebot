@@ -1,0 +1,2 @@
+1. ввести в терминал pip install -r requirements.txt
+2. запустить main.py

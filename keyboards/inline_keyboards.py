@@ -34,7 +34,7 @@ def get_empty_cart_keyboard() -> InlineKeyboardMarkup:
 def get_back_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура с кнопкой 'Назад'"""
     builder = InlineKeyboardBuilder()
-    builder.button(text="← Назад", callback_data="back_to_main")
+    builder.button(text="⬅️ Назад", callback_data="back_to_admin")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -67,9 +67,54 @@ def get_confirmation_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_orders_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура для раздела заказов"""
+def get_admin_menu_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура главного меню админ панели"""
     builder = InlineKeyboardBuilder()
-    builder.button(text="⬅️ Назад", callback_data="back_to_main")
+    builder.button(text="🍽️ Меню", callback_data="admin_dishes")
+    builder.button(text="📦 Заказы", callback_data="admin_orders")
+    builder.button(text="👥 Сотрудники", callback_data="admin_employees")
+    builder.button(text="📊 Отчеты", callback_data="admin_reports")
+    builder.button(text="⬅️ Выход", callback_data="back_to_main")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def get_admin_dishes_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура управления блюдами"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Добавить блюдо", callback_data="admin_add_dish")
+    builder.button(text="📋 Список блюд", callback_data="admin_list_dishes")
+    builder.button(text="🗑️ Удалить блюдо", callback_data="admin_delete_dish")
+    builder.button(text="⬅️ Назад", callback_data="admin_menu")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def get_admin_orders_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура управления заказами"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📦 Активные заказы", callback_data="admin_active_orders")
+    builder.button(text="📊 Отчеты", callback_data="admin_reports")
+    builder.button(text="⬅️ Назад", callback_data="admin_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_admin_employees_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура управления сотрудниками"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Добавить сотрудника", callback_data="admin_add_employee")
+    builder.button(text="📋 Список сотрудников", callback_data="admin_list_employees")
+    builder.button(text="⬅️ Назад", callback_data="admin_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_admin_confirmation_keyboard(options, prefix="") -> InlineKeyboardMarkup:
+    """Генерация клавиатуры для подтверждения с вариантами"""
+    builder = InlineKeyboardBuilder()
+    for option in options:
+        builder.button(text=option, callback_data=f"{prefix}{option.lower()}")
+    builder.button(text="❌ Отмена", callback_data="back_to_admin")
     builder.adjust(1)
     return builder.as_markup()
