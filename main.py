@@ -31,9 +31,9 @@ async def graceful_shutdown(bot: Bot):
 
 
 # Исправленный обработчик ошибок
-async def error_handler(update, exception):
+async def error_handler(event, exception):
     """Глобальный обработчик ошибок"""
-    logger.error(f"Update {update} caused error: {exception}", exc_info=True)
+    logger.error(f"Event {event} caused error: {exception}", exc_info=True)
 
     # Игнорируем известные не критические ошибки
     ignore_errors = [
@@ -70,7 +70,7 @@ async def main():
     dp.include_router(user_handlers.router)
     dp.include_router(admin_handlers.router)
 
-    # Регистрация обработчика ошибок (исправленный способ)
+    # Регистрация обработчика ошибок
     dp.errors.register(error_handler)
 
     # Информация о запуске

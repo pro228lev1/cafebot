@@ -15,9 +15,15 @@ from keyboards.inline_keyboards import (
 )
 from utils.date_utils import is_order_deadline_passed
 from utils.safe_message_edit import safe_edit_message, safe_answer_callback
+import logging
+from datetime import datetime
 
 router = Router()
 sheets = GoogleSheetsService()
+logger = logging.getLogger(__name__)
+
+# Глобальное хранилище корзин (резервный механизм)
+global_carts = {}
 
 
 class OrderStates(StatesGroup):
@@ -54,7 +60,62 @@ def format_cart_text(cart):
     return text, total_price
 
 
-async def check_user_registration(callback: CallbackQuery, state: FSMContext = None):
+def get_user_key(user_id, chat_id):
+    """Генерация уникального ключа для пользователя"""
+    return f"{user_id}_{chat_id}"
+
+
+async def save_cart(state: FSMContext, cart, user_id=None, chat_id=None):
+    """Сохранение корзины в состояние и глобальное хранилище"""
+    try:
+        # Сохраняем в состояние FSM
+        await state.update_data(cart=cart)
+        logger.info(f"💾 Корзина сохранена в состояние FSM: {len(cart)} товаров")
+
+        # Резервное сохранение в глобальное хранилище
+        if user_id and chat_id:
+            user_key = get_user_key(user_id, chat_id)
+            global_carts[user_key] = {
+                'cart': cart.copy(),
+                'timestamp': datetime.now().timestamp()
+            }
+            logger.info(f"💾 Корзина сохранена в глобальное хранилище для {user_key}: {len(cart)} товаров")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения корзины: {str(e)}")
+
+
+async def get_cart(state: FSMContext, user_id=None, chat_id=None):
+    """Получение корзины из состояния с резервным механизмом"""
+    try:
+        # Получаем данные из состояния FSM
+        data = await state.get_data()
+        cart = data.get("cart", [])
+
+        if cart:
+            logger.info(f"✅ Корзина получена из состояния FSM: {len(cart)} товаров")
+            return cart
+
+        # Попытка получить из глобального хранилища
+        if user_id and chat_id:
+            user_key = get_user_key(user_id, chat_id)
+            cached = global_carts.get(user_key)
+
+            if cached and (datetime.now().timestamp() - cached['timestamp']) < 3600:  # 1 час
+                cart = cached['cart'].copy()
+                # Восстанавливаем корзину в состояние FSM
+                await state.update_data(cart=cart)
+                logger.info(f"✅ Корзина восстановлена из глобального хранилища для {user_key}: {len(cart)} товаров")
+                return cart
+
+        logger.info("🛒 Корзина пуста (нет данных в FSM и глобальном хранилище)")
+        return []
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения корзины: {str(e)}")
+        return []
+
+
+async def check_user_registration(callback: CallbackQuery):
     """Проверка регистрации пользователя"""
     user_id = callback.from_user.id
 
@@ -72,25 +133,42 @@ async def check_user_registration(callback: CallbackQuery, state: FSMContext = N
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
+    chat_id = message.chat.id
     full_name = message.from_user.full_name
+
+    # Не очищаем состояние полностью, только сохраняем регистрацию
+    await state.set_state(None)  # Сбрасываем состояние, но не данные
 
     # Автоматическая регистрация новых пользователей
     if not sheets.is_user_registered(user_id):
-        sheets.register_user(user_id, full_name)
-        welcome_text = (
-            "✅ Вы успешно зарегистрированы!\n\n"
-            "👋 Добро пожаловать в систему заказа обедов!\n"
-            "Теперь вы можете оформлять заказы на обеды."
-        )
-        await message.answer(welcome_text, reply_markup=get_main_menu_keyboard())
+        success = sheets.register_user(user_id, full_name)
+        if success:
+            welcome_text = (
+                "✅ Вы успешно зарегистрированы!\n\n"
+                "👋 Добро пожаловать в систему заказа обедов!\n"
+                "Теперь вы можете оформлять заказы на обеды."
+            )
+            await message.answer(welcome_text, reply_markup=get_main_menu_keyboard())
+        else:
+            await message.answer(
+                "❌ Ошибка регистрации! Обратитесь к администратору.",
+                reply_markup=get_main_menu_keyboard()
+            )
     else:
         await message.answer(WELCOME_TEXT, reply_markup=get_main_menu_keyboard())
 
 
 @router.callback_query(F.data == "menu")
 async def show_menu(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+
     if not await check_user_registration(callback):
         return
+
+    # Сохраняем текущую корзину перед показом меню
+    current_cart = await get_cart(state, user_id, chat_id)
+    await save_cart(state, current_cart, user_id, chat_id)
 
     dishes = sheets.get_active_dishes()
     if not dishes:
@@ -118,6 +196,9 @@ async def show_menu(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("select_"))
 async def select_dish_quantity(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+
     if not await check_user_registration(callback):
         return
 
@@ -150,10 +231,18 @@ async def select_dish_quantity(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("quantity_"))
 async def add_to_cart(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+
     if not await check_user_registration(callback):
         return
 
-    quantity = int(callback.data.split("_")[1])
+    try:
+        quantity = int(callback.data.split("_")[1])
+    except (ValueError, IndexError):
+        await safe_answer_callback(callback, "❌ Неверное количество!", show_alert=True)
+        return
+
     data = await state.get_data()
     dish = data.get("selected_dish")
 
@@ -161,18 +250,16 @@ async def add_to_cart(callback: CallbackQuery, state: FSMContext):
         await safe_answer_callback(callback, "❌ Ошибка выбора блюда!", show_alert=True)
         return
 
-    # Получаем текущую корзину
-    cart = data.get("cart", [])
+    # Получаем текущую корзину (без очистки)
+    cart = await get_cart(state, user_id, chat_id)
 
     # Проверяем, есть ли уже это блюдо в корзине
-    existing_item = next((item for item in cart if item["ID"] == dish["ID"]), None)
+    existing_item = next((item for item in cart if str(item["ID"]) == str(dish["ID"])), None)
 
     if existing_item:
         # Обновляем количество
         existing_item["quantity"] += quantity
-        await safe_answer_callback(callback,
-                                   f"🔄 Количество {dish['Название']} обновлено до {existing_item['quantity']} шт!",
-                                   show_alert=True)
+        message = f"🔄 Количество {dish['Название']} обновлено до {existing_item['quantity']} шт!"
     else:
         # Добавляем новое блюдо
         cart.append({
@@ -183,76 +270,60 @@ async def add_to_cart(callback: CallbackQuery, state: FSMContext):
             "Описание": dish.get("Описание", ""),
             "Кафе": dish.get("Кафе", "Coffee Time")
         })
-        await safe_answer_callback(callback, f"✅ {dish['Название']} x{quantity} добавлено в корзину!", show_alert=True)
+        message = f"✅ {dish['Название']} x{quantity} добавлено в корзину!"
 
-    # Обновляем корзину в состоянии
-    await state.update_data(cart=cart)
+    # Сохраняем корзину
+    await save_cart(state, cart, user_id, chat_id)
 
-    # Возвращаемся в меню
+    await safe_answer_callback(callback, message, show_alert=True)
+
+    # Возвращаемся в меню без очистки корзины
     await show_menu(callback, state)
 
 
-@router.callback_query(F.data == "my_orders")
-async def show_my_orders(callback: CallbackQuery):
-    if not await check_user_registration(callback):
-        return
-
-    user_id = callback.from_user.id
-    orders = sheets.get_user_orders(user_id)
-
-    if not orders:
-        orders_text = "📋 История заказов пуста.\n\nУ вас еще нет оформленных заказов."
-    else:
-        orders_text = "📋 История ваших заказов:\n\n"
-        # Берем последние 5 заказов, сортируем по дате в обратном порядке
-        recent_orders = sorted(orders, key=lambda x: x.get("Дата_заказа", ""), reverse=True)[:5]
-
-        for i, order in enumerate(recent_orders, 1):
-            order_date = order.get("Дата_заказа", "Нет данных")
-            items = order.get("Состав", "Нет данных")
-            total_price = order.get("Сумма", "0")
-            orders_text += f"{i}. Заказ от {order_date}:\n   {items}\n   💰 Сумма: {total_price}₽\n\n"
-
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="📊 Статистика", callback_data="stats")
-    keyboard.button(text="⬅️ Назад", callback_data="back_to_main")
-    keyboard.adjust(1)
-
-    # Добавляем обработчик для случая, когда содержимое не изменилось
-    async def on_same_content(cb: CallbackQuery):
-        await safe_answer_callback(cb, "🔄 Вы уже просматриваете историю заказов", show_alert=False)
-
-    await safe_edit_message(
-        callback,
-        orders_text,
-        keyboard.as_markup(),
-        on_same_content=on_same_content
-    )
-
 @router.callback_query(F.data == "cart")
 async def show_cart(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+
     if not await check_user_registration(callback):
         return
 
-    data = await state.get_data()
-    cart = data.get("cart", [])
+    cart = await get_cart(state, user_id, chat_id)
 
     cart_text, total_price = format_cart_text(cart)
 
     if not cart:
-        await safe_edit_message(callback, cart_text, get_empty_cart_keyboard())
+        # Если корзина пуста, показываем специальную клавиатуру
+        await safe_edit_message(
+            callback,
+            cart_text,
+            get_empty_cart_keyboard()
+        )
         return
 
-    await safe_edit_message(callback, cart_text, get_cart_keyboard())
+    # Если корзина не пуста, показываем стандартную клавиатуру
+    await safe_edit_message(
+        callback,
+        cart_text,
+        get_cart_keyboard()
+    )
     await state.set_state(OrderStates.confirming_order)
 
 
 @router.callback_query(F.data == "clear_cart")
 async def clear_cart(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+
     if not await check_user_registration(callback):
         return
 
-    await state.update_data(cart=[])
+    # Очищаем корзину
+    await save_cart(state, [], user_id, chat_id)
+    logger.info("🧹 Корзина очищена пользователем")
+
+    # Показываем сообщение об очистке
     await safe_edit_message(
         callback,
         "🛒 Корзина очищена!\n\nДобавьте блюда из меню.",
@@ -262,6 +333,9 @@ async def clear_cart(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "confirm_order")
 async def confirm_order_details(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+
     if not await check_user_registration(callback):
         return
 
@@ -270,8 +344,7 @@ async def confirm_order_details(callback: CallbackQuery, state: FSMContext):
                                    show_alert=True)
         return
 
-    data = await state.get_data()
-    cart = data.get("cart", [])
+    cart = await get_cart(state, user_id, chat_id)
 
     if not cart:
         await safe_answer_callback(callback, "🛒 Корзина пуста!", show_alert=True)
@@ -298,26 +371,34 @@ async def confirm_order_details(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "finalize_order")
 async def finalize_order(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+
     if not await check_user_registration(callback):
         return
 
-    data = await state.get_data()
-    cart = data.get("cart", [])
+    cart = await get_cart(state, user_id, chat_id)
 
     if not cart:
         await safe_answer_callback(callback, "🛒 Корзина пуста!", show_alert=True)
         return
 
-    user_id = callback.from_user.id
     success = sheets.add_order(user_id, cart)
 
     if success:
-        await state.update_data(cart=[])
+        # Сохраняем заказ в истории перед очисткой корзины
+        logger.info(f"✅ Заказ успешно оформлен для пользователя {user_id}: {cart}")
+
+        # Очищаем корзину после успешного заказа
+        await save_cart(state, [], user_id, chat_id)
+
+        # Рассчитываем итоговую стоимость для сообщения
+        total_price = sum(item.get('Цена', 0) * item['quantity'] for item in cart)
+
         order_details = (
             "🎉 Заказ успешно оформлен!\n\n"
             "📋 Детали заказа:\n"
-            f"🆔 Номер заказа: {len(sheets.get_user_orders(user_id)) + 1}\n"
-            f"💰 Сумма: {sum(item.get('Цена', 0) * item['quantity'] for item in cart)}₽\n"
+            f"💰 Сумма: {total_price}₽\n"
             "⏰ Доставка: завтра с 13:00 до 14:00\n"
             "📍 Адрес: Офис компании\n\n"
             "📱 Вы получите уведомление за час до доставки.\n"
@@ -332,12 +413,57 @@ async def finalize_order(callback: CallbackQuery, state: FSMContext):
         await safe_answer_callback(callback, "❌ Ошибка оформления заказа! Попробуйте позже.", show_alert=True)
 
 
-@router.callback_query(F.data == "back_to_main")
-async def back_to_main(callback: CallbackQuery, state: FSMContext):
-    if not await check_user_registration(callback, state):
+@router.callback_query(F.data == "my_orders")
+async def show_my_orders(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+
+    if not await check_user_registration(callback):
         return
 
-    await state.clear()
+    # Сохраняем текущую корзину перед показом заказов
+    chat_id = callback.message.chat.id
+    current_cart = await get_cart(state, user_id, chat_id)
+    await save_cart(state, current_cart, user_id, chat_id)
+
+    orders = sheets.get_user_orders(user_id)
+
+    if not orders:
+        orders_text = "📋 История заказов пуста.\n\nУ вас еще нет оформленных заказов."
+    else:
+        orders_text = "📋 История ваших заказов:\n\n"
+        # Берем последние 10 заказов
+        recent_orders = sorted(orders, key=lambda x: x.get("Дата_заказа", ""), reverse=True)[:10]
+
+        for i, order in enumerate(recent_orders, 1):
+            order_date = order.get("Дата_заказа", "Нет данных")
+            items = order.get("Состав", "Нет данных")
+            total_price = order.get("Сумма", "0")
+            orders_text += f"{i}. Заказ от {order_date}:\n   {items}\n   💰 Сумма: {total_price}₽\n\n"
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="⬅️ Назад", callback_data="back_to_main")
+    keyboard.adjust(1)
+
+    await safe_edit_message(
+        callback,
+        orders_text,
+        keyboard.as_markup()
+    )
+
+
+@router.callback_query(F.data == "back_to_main")
+async def back_to_main(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+
+    if not await check_user_registration(callback):
+        return
+
+    # СОХРАНЯЕМ корзину при возврате в главное меню
+    current_cart = await get_cart(state, user_id, chat_id)
+    await save_cart(state, current_cart, user_id, chat_id)
+    logger.info(f"🔙 Возврат в главное меню. Корзина сохранена: {len(current_cart)} товаров")
+
     await safe_edit_message(
         callback,
         WELCOME_TEXT,
@@ -346,15 +472,34 @@ async def back_to_main(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message()
-async def unknown_message(message: Message):
+async def unknown_message(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+
+    # Сохраняем текущую корзину перед отправкой сообщения
+    current_cart = await get_cart(state, user_id, chat_id)
+    if current_cart:
+        await save_cart(state, current_cart, user_id, chat_id)
+
     await message.answer(
-        "❓ Неизвестная команда\n\n"
-        "Используйте меню для навигации или команду /start",
+        WELCOME_TEXT,
         reply_markup=get_main_menu_keyboard()
     )
 
 
 @router.callback_query()
 async def unknown_callback(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    chat_id = callback.message.chat.id
+
+    # Сохраняем текущую корзину перед обработкой callback
+    current_cart = await get_cart(state, user_id, chat_id)
+    if current_cart:
+        await save_cart(state, current_cart, user_id, chat_id)
+
     await safe_answer_callback(callback, "❗ Неизвестное действие")
-    await back_to_main(callback, state)
+    await safe_edit_message(
+        callback,
+        WELCOME_TEXT,
+        get_main_menu_keyboard()
+    )

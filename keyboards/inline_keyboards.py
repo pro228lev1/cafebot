@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
@@ -13,7 +13,7 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_cart_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура для корзины"""
+    """Клавиатура для корзины (когда корзина не пуста)"""
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Оформить заказ", callback_data="confirm_order")
     builder.button(text="🗑 Очистить корзину", callback_data="clear_cart")
@@ -34,7 +34,7 @@ def get_empty_cart_keyboard() -> InlineKeyboardMarkup:
 def get_back_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура с кнопкой 'Назад'"""
     builder = InlineKeyboardBuilder()
-    builder.button(text="⬅️ Назад", callback_data="back_to_main")
+    builder.button(text="← Назад", callback_data="back_to_main")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -63,5 +63,13 @@ def get_confirmation_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="✅ Подтвердить заказ", callback_data="finalize_order")
     builder.button(text="✏️ Изменить корзину", callback_data="cart")
     builder.button(text="❌ Отменить заказ", callback_data="back_to_main")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_orders_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для раздела заказов"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ Назад", callback_data="back_to_main")
     builder.adjust(1)
     return builder.as_markup()

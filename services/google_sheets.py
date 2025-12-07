@@ -6,6 +6,7 @@ import pytz
 import logging
 import os
 import time
+import json
 from config.settings import Config
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,6 @@ class GoogleSheetsService:
                         logger.error("❌ Файл credentials пустой!")
                         raise ValueError("Credentials file is empty")
                     # Проверяем, что это JSON
-                    import json
                     json.loads(content)
                     logger.info("✅ Файл credentials содержит корректный JSON")
             except json.JSONDecodeError:
@@ -376,13 +376,22 @@ class GoogleSheetsService:
                         dish["Описание"] = dish.get("Описание", "")
                         dish["Кафе"] = dish.get("Кафе", "Coffee Time")
 
-                        # Безопасное получение цены
+                        # Безопасное получение цены с улучшенной обработкой форматов
+                        price_raw = dish.get("Цена", "0")
+                        price_str = str(price_raw).strip()
+
+                        # Обработка различных форматов цен
+                        price_str = price_str.replace(" ", "")  # Убираем пробелы
+                        price_str = price_str.replace("₽", "")  # Убираем символ рубля
+                        price_str = price_str.replace(",", ".")  # Заменяем запятую на точку
+
                         try:
-                            dish["Цена"] = int(float(str(dish.get("Цена", 0)).strip() or 0))
+                            # Пытаемся преобразовать в float, затем в int
+                            price_value = float(price_str)
+                            dish["Цена"] = int(price_value)
                         except (ValueError, TypeError):
                             dish["Цена"] = 0
-                            logger.warning(
-                                f"⚠️ Неверный формат цены для блюда '{dish['Название']}': {dish.get('Цена', '')}")
+                            logger.warning(f"⚠️ Неверный формат цены для блюда '{dish['Название']}': '{price_raw}'")
 
                         active_dishes.append(dish)
 
@@ -411,7 +420,8 @@ class GoogleSheetsService:
 
             try:
                 records = worksheet.get_all_records()
-                user_orders = [order for order in records if str(order.get("Сотрудник", "")) == str(user_id)]
+                user_orders = [order for order in records if
+                               str(order.get("Сотрудник", "")).strip() == str(user_id).strip()]
                 logger.info(f"✅ Найдено {len(user_orders)} заказов для пользователя {user_id}")
                 return user_orders
             except Exception as e:
